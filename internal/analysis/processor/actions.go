@@ -160,6 +160,7 @@ type MqttAction struct {
 	Description    string
 	CorrelationID  string     // Detection correlation ID for log tracking
 	mu             sync.Mutex // Protect concurrent access to Note
+	processor      *Processor // Added for cooldown state tracking
 }
 
 type UpdateRangeFilterAction struct {
@@ -1044,6 +1045,43 @@ func (a *MqttAction) Execute(data any) error {
 			Context("retryable", false). // Configuration error - not retryable
 			Context("config_section", "realtime.mqtt.topic").
 			Build()
+	}
+
+	// Check cooldown if configured and processor is available
+	if a.Settings.Realtime.MQTT.CooldownMinutes > 0 && a.processor != nil {
+		cooldownDuration := time.Duration(a.Settings.Realtime.MQTT.CooldownMinutes) * time.Minute
+		species := a.Note.CommonName // Use common name as key
+
+		// Use processor's detectionMutex to protect access to LastMqttNotification
+		// Note: We need to use detectionMutex because it protects the maps in Processor struct
+		// Wait... detectionMutex protects LastDogDetection and LastHumanDetection.
+		// LastMqttNotification is new. We should use detectionMutex for it too or add a new one.
+		// Looking at processor.go, detectionMutex protects "LastDogDetection and LastHumanDetection maps".
+		// It's safe to reuse it for LastMqttNotification.
+		// However, I cannot access private fields of processor from here (same package, so I CAN access private fields).
+		// But let's check if I can access detectionMutex. Yes, I can.
+
+		a.processor.detectionMutex.Lock()
+		lastNotification, exists := a.processor.LastMqttNotification[species]
+		now := time.Now()
+
+		if exists && now.Sub(lastNotification) < cooldownDuration {
+			a.processor.detectionMutex.Unlock()
+			if a.Settings.Debug {
+				GetLogger().Debug("Skipping MQTT notification due to cooldown",
+					logger.String("component", "analysis.processor.actions"),
+					logger.String("detection_id", a.CorrelationID),
+					logger.String("species", species),
+					logger.Float64("cooldown_minutes", float64(a.Settings.Realtime.MQTT.CooldownMinutes)),
+					logger.String("last_notification", lastNotification.Format(time.RFC3339)),
+					logger.String("operation", "mqtt_cooldown_check"))
+			}
+			return nil
+		}
+		
+		// Update last notification time
+		a.processor.LastMqttNotification[species] = now
+		a.processor.detectionMutex.Unlock()
 	}
 
 	// Get bird image of detected bird using the shared helper

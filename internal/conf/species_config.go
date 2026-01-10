@@ -37,3 +37,17 @@ func NormalizeSpeciesConfigKeys(config map[string]SpeciesConfig) map[string]Spec
 
 	return normalized
 }
+
+// IsSpeciesExcluded checks if a species is in the exclusion list.
+// It uses exact matching against the configured exclude list.
+func (s *Settings) IsSpeciesExcluded(species string) bool {
+	settingsMutex.RLock()
+	defer settingsMutex.RUnlock()
+
+	for _, excluded := range s.Realtime.Species.Exclude {
+		if excluded == species {
+			return true
+		}
+	}
+	return false
+}

@@ -59,9 +59,10 @@ type Processor struct {
 	lastSyncAttempt     time.Time               // Last time sync was attempted
 	syncMutex           sync.Mutex              // Mutex to protect sync operations
 	syncInProgress      atomic.Bool             // Flag to prevent overlapping syncs
-	LastDogDetection    map[string]time.Time    // keep track of dog barks per audio source
-	LastHumanDetection  map[string]time.Time    // keep track of human vocal per audio source
-	Metrics             *observability.Metrics
+	LastDogDetection     map[string]time.Time // keep track of dog barks per audio source
+	LastHumanDetection   map[string]time.Time // keep track of human vocal per audio source
+	LastMqttNotification map[string]time.Time // keep track of last MQTT notification per species
+	Metrics              *observability.Metrics
 	DynamicThresholds   map[string]*DynamicThreshold
 	thresholdsMutex     sync.RWMutex // Mutex to protect access to DynamicThresholds
 	pendingDetections   map[string]PendingDetection
@@ -261,11 +262,12 @@ func New(settings *conf.Settings, ds datastore.Interface, bn *birdnet.BirdNET, m
 			time.Duration(settings.Realtime.Interval)*time.Second,
 			settings.Realtime.Species.Config,
 		),
-		Metrics:             metrics,
-		LastDogDetection:    make(map[string]time.Time),
-		LastHumanDetection:  make(map[string]time.Time),
-		DynamicThresholds:   make(map[string]*DynamicThreshold),
-		pendingDetections:   make(map[string]PendingDetection),
+		Metrics:              metrics,
+		LastDogDetection:     make(map[string]time.Time),
+		LastHumanDetection:   make(map[string]time.Time),
+		LastMqttNotification: make(map[string]time.Time),
+		DynamicThresholds:    make(map[string]*DynamicThreshold),
+		pendingDetections:    make(map[string]PendingDetection),
 		lastDogDetectionLog: make(map[string]time.Time),
 		controlChan:         make(chan string, 10),  // Buffered channel to prevent blocking
 		JobQueue:            jobqueue.NewJobQueue(), // Initialize the job queue
@@ -636,6 +638,17 @@ func (p *Processor) shouldFilterDetection(result datastore.Results, commonName, 
 				logger.Float32("threshold", confidenceThreshold),
 				logger.String("source", p.getDisplayNameForSource(source)),
 				logger.String("operation", "confidence_filter"))
+		}
+		return true, confidenceThreshold
+	}
+
+	// Check species exclusion filter
+	if p.Settings.IsSpeciesExcluded(commonName) {
+		if p.Settings.Debug {
+			GetLogger().Debug("species on excluded list",
+				logger.String("species", commonName),
+				logger.Float32("confidence", result.Confidence),
+				logger.String("operation", "species_exclusion_filter"))
 		}
 		return true, confidenceThreshold
 	}
@@ -1303,6 +1316,7 @@ func (p *Processor) getDefaultActions(detection *Detections) []Action {
 				BirdImageCache: p.BirdImageCache,
 				RetryConfig:    mqttRetryConfig,
 				CorrelationID:  detection.CorrelationID,
+				processor:      p, // Inject processor for cooldown tracking
 			})
 		}
 	}

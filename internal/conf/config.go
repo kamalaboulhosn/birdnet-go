@@ -432,15 +432,16 @@ type RTSPSettings struct {
 
 // MQTTSettings contains settings for MQTT integration.
 type MQTTSettings struct {
-	Enabled       bool            `json:"enabled"`       // true to enable MQTT
-	Debug         bool            `json:"debug"`         // true to enable MQTT debug
-	Broker        string          `json:"broker"`        // MQTT broker URL
-	Topic         string          `json:"topic"`         // MQTT topic
-	Username      string          `json:"username"`      // MQTT username
-	Password      string          `json:"password"`      // MQTT password
-	Retain        bool            `json:"retain"`        // true to retain messages
-	RetrySettings RetrySettings   `json:"retrySettings"` // settings for retry mechanism
-	TLS           MQTTTLSSettings `json:"tls"`           // TLS/SSL configuration
+	Enabled         bool            `json:"enabled"`         // true to enable MQTT
+	Debug           bool            `json:"debug"`           // true to enable MQTT debug
+	Broker          string          `json:"broker"`          // MQTT broker URL
+	Topic           string          `json:"topic"`           // MQTT topic
+	Username        string          `json:"username"`        // MQTT username
+	Password        string          `json:"password"`        // MQTT password
+	Retain          bool            `json:"retain"`          // true to retain messages
+	CooldownMinutes int             `json:"cooldownMinutes"` // Cooldown period in minutes for same-species notifications
+	RetrySettings   RetrySettings   `json:"retrySettings"`   // settings for retry mechanism
+	TLS             MQTTTLSSettings `json:"tls"`             // TLS/SSL configuration
 }
 
 // MQTTTLSSettings contains TLS/SSL configuration for secure MQTT connections
