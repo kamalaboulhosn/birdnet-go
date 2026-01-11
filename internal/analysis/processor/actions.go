@@ -1127,7 +1127,7 @@ func (a *MqttAction) Execute(data any) error {
 	// Add ReviewURL if ID is valid
 	if noteCopy.ID > 0 {
 		// Construct the ReviewURL using BaseURL/Host settings if available
-		baseURL := a.Settings.Security.BaseURL
+		baseURL := a.Settings.Security.GetBaseURL("")
 		
 		if baseURL != "" {
 			// Prepend base URL to the relative path
