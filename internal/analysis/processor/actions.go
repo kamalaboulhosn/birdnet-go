@@ -158,9 +158,17 @@ type MqttAction struct {
 	EventTracker   *EventTracker
 	RetryConfig    jobqueue.RetryConfig // Configuration for retry behavior
 	Description    string
-	CorrelationID  string     // Detection correlation ID for log tracking
-	mu             sync.Mutex // Protect concurrent access to Note
-	processor      *Processor // Added for cooldown state tracking
+	CorrelationID  string              // Detection correlation ID for log tracking
+	mu             sync.Mutex          // Protect concurrent access to Note
+	processor      *Processor          // Added for cooldown state tracking
+	Ds             datastore.Interface // Added for querying database ID for ReviewURL
+}
+
+// MqttPayload defines the JSON structure sent via MQTT
+// It embeds NoteWithBirdImage and adds ReviewURL
+type MqttPayload struct {
+	NoteWithBirdImage
+	ReviewURL string `json:"ReviewURL,omitempty"`
 }
 
 type UpdateRangeFilterAction struct {
@@ -1090,11 +1098,48 @@ func (a *MqttAction) Execute(data any) error {
 	// Create a copy of the Note (source is already sanitized in SafeString field)
 	noteCopy := a.Note
 
+	// Wait for database ID to be assigned if Note.ID is 0 (new detection)
+	// This ensures we can generate the ReviewURL
+	if noteCopy.ID == 0 {
+		if err := a.waitForDatabaseID(); err != nil {
+			// Log warning but make best effort with 0 ID
+			GetLogger().Warn("Database ID not ready for MQTT publish",
+				logger.String("component", "analysis.processor.actions"),
+				logger.String("detection_id", a.CorrelationID),
+				logger.Error(err),
+				logger.String("species", a.Note.CommonName),
+				logger.Any("note_id", a.Note.ID),
+				logger.String("operation", "mqtt_wait_database_id"))
+		} else {
+			// Update local copy with the found ID from a.Note (which was updated by waitForDatabaseID)
+			noteCopy.ID = a.Note.ID
+		}
+	}
+
 	// Wrap note with bird image (using copy)
 	noteWithBirdImage := NoteWithBirdImage{Note: noteCopy, BirdImage: birdImage}
 
-	// Create a JSON representation of the note
-	noteJson, err := json.Marshal(noteWithBirdImage)
+	// Create payload with ReviewURL
+	payload := MqttPayload{
+		NoteWithBirdImage: noteWithBirdImage,
+	}
+
+	// Add ReviewURL if ID is valid
+	if noteCopy.ID > 0 {
+		// Construct the ReviewURL using BaseURL/Host settings if available
+		baseURL := a.Settings.Security.BaseURL
+		
+		if baseURL != "" {
+			// Prepend base URL to the relative path
+			payload.ReviewURL = fmt.Sprintf("%s/ui/detections/%d", baseURL, noteCopy.ID)
+		} else {
+			// Fallback to relative path if no base URL configured
+			payload.ReviewURL = fmt.Sprintf("ui/detections/%d", noteCopy.ID)
+		}
+	}
+
+	// Create a JSON representation of the payload
+	noteJson, err := json.Marshal(payload)
 	if err != nil {
 		GetLogger().Error("Failed to marshal note to JSON",
 			logger.String("component", "analysis.processor.actions"),
@@ -1392,6 +1437,93 @@ func (a *SSEAction) waitForDatabaseID() error {
 
 // findNoteInDatabase searches for the note in database by unique characteristics
 func (a *SSEAction) findNoteInDatabase() (*datastore.Note, error) {
+	if a.Ds == nil {
+		return nil, errors.Newf("datastore not available").
+			Component("analysis.processor").
+			Category(errors.CategoryDatabase).
+			Context("operation", "find_note_in_database").
+			Context("retryable", false). // System configuration issue - not retryable
+			Build()
+	}
+
+	// Search for notes with matching characteristics
+	// The SearchNotes method expects a search query string that will match against
+	// common_name or scientific_name fields
+	query := a.Note.ScientificName
+
+	// Search for notes, sorted by ID descending to get the most recent
+	notes, err := a.Ds.SearchNotes(query, false, DatabaseSearchLimit, 0) // false = sort descending, offset 0
+	if err != nil {
+		return nil, errors.New(err).
+			Component("analysis.processor").
+			Category(errors.CategoryDatabase).
+			Context("operation", "search_notes").
+			Context("query", query).
+			Build()
+	}
+
+	// Filter results to find the exact match based on date and time
+	for i := range notes {
+		note := &notes[i]
+		// Check if this note matches our expected characteristics
+		if note.Date == a.Note.Date &&
+			note.ScientificName == a.Note.ScientificName &&
+			note.Time == a.Note.Time { // Exact time match
+			return note, nil
+		}
+	}
+
+	return nil, errors.Newf("note not found in database").
+		Component("analysis.processor").
+		Category(errors.CategoryNotFound).
+		Context("operation", "find_note_in_database").
+		Context("species", a.Note.ScientificName).
+		Context("date", a.Note.Date).
+		Context("time", a.Note.Time).
+		Build()
+}
+
+// waitForDatabaseID waits for the Note to be saved to database and ID assigned
+// This is identical to SSEAction's implementation but bound to MqttAction
+func (a *MqttAction) waitForDatabaseID() error {
+	// We need to query the database to find this note by unique characteristics
+	// Since we don't have the ID yet, we'll search by time, species, and confidence
+	deadline := time.Now().Add(SSEDatabaseIDTimeout)
+
+	for time.Now().Before(deadline) {
+		// Query database for a note matching our characteristics
+		// Use a small time window around the detection time to find the record
+		if updatedNote, err := a.findNoteInDatabase(); err == nil && updatedNote.ID > 0 {
+			// Found the note with an ID, update our copy
+			a.Note.ID = updatedNote.ID
+			if a.Settings.Debug {
+				GetLogger().Debug("Found database ID for MQTT publish",
+					logger.String("component", "analysis.processor.actions"),
+					logger.String("detection_id", a.CorrelationID),
+					logger.Any("database_id", updatedNote.ID),
+					logger.String("species", a.Note.CommonName),
+					logger.String("scientific_name", a.Note.ScientificName),
+					logger.String("operation", "wait_database_id_success"))
+			}
+			return nil
+		}
+
+		time.Sleep(SSEDatabaseCheckInterval)
+	}
+
+	// Timeout reached
+	return errors.Newf("database ID not assigned for %s after %v timeout", a.Note.CommonName, SSEDatabaseIDTimeout).
+		Component("analysis.processor").
+		Category(errors.CategoryTimeout).
+		Context("operation", "wait_for_database_id").
+		Context("species", a.Note.CommonName).
+		Context("timeout_seconds", SSEDatabaseIDTimeout.Seconds()).
+		Build()
+}
+
+// findNoteInDatabase searches for the note in database by unique characteristics
+// This is identical to SSEAction's implementation but bound to MqttAction
+func (a *MqttAction) findNoteInDatabase() (*datastore.Note, error) {
 	if a.Ds == nil {
 		return nil, errors.Newf("datastore not available").
 			Component("analysis.processor").

@@ -1316,7 +1316,8 @@ func (p *Processor) getDefaultActions(detection *Detections) []Action {
 				BirdImageCache: p.BirdImageCache,
 				RetryConfig:    mqttRetryConfig,
 				CorrelationID:  detection.CorrelationID,
-				processor:      p, // Inject processor for cooldown tracking
+				processor:      p,    // Inject processor for cooldown tracking
+				Ds:             p.Ds, // Inject datastore for ReviewURL generation
 			})
 		}
 	}
